@@ -45,6 +45,18 @@ struct Snake_GameTests {
         #expect(started?.line.contains("started moving right") == true)
     }
 
+    @Test func downloadedLogContainsEveryMovementThatWasRecorded() {
+        let game = makeGame()
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        game.start(at: start, halfExtents: SIMD2(10, 10))
+
+        let text = game.logText
+        #expect(text.contains("Snake Game log"))
+        #expect(text.contains("Entries: \(game.log.count)"))
+        #expect(text.contains("started moving right"))
+        #expect(text.contains(LogClock.string(from: start)))
+    }
+
     @Test func csvExportCanBeSavedWithTimestamps() {
         let game = makeGame()
         let start = Date(timeIntervalSince1970: 1_700_000_000)

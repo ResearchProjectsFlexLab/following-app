@@ -126,6 +126,19 @@ final class FollowGame {
     var boundsMin: SIMD2<Float> { center - halfExtents }
     var boundsMax: SIMD2<Float> { center + halfExtents }
 
+    /// Plain-text export of every logged event, in the order it was written.
+    var logText: String {
+        var lines = [
+            "Snake Game log",
+            "Generated: \(LogClock.string(from: log.last?.timestamp ?? .now))",
+            "Entries: \(log.count)",
+            "A line is written each time the snake moves or turns.",
+            "",
+        ]
+        lines.append(contentsOf: log.map(\.line))
+        return lines.joined(separator: "\n")
+    }
+
     /// Spreadsheet export of every logged event, including timestamps.
     var csvText: String {
         var rows = ["timestamp,event,direction,previous_direction,x,y,message"]

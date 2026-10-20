@@ -5,14 +5,14 @@
 //  Created by Prisha Marpu on 10/2/26.
 //
 
+import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
 
 struct ContentView: View {
     @Environment(AppModel.self) private var appModel
     @State private var lastTick: Date?
-    @State private var exportDocument: LogCSVDocument?
-    @State private var exportFilename = "movement-log"
+    @State private var exportText = ""
     @State private var showExporter = false
     @State private var saveNotice: String?
 
@@ -27,48 +27,19 @@ struct ContentView: View {
 
             HStack(alignment: .center, spacing: 16) {
                 StatusItem(title: "Direction", value: directionText)
-                Button("Save log") {
-                    exportDocument = LogCSVDocument(text: appModel.game.csvText)
-                    exportFilename = "movement-log-\(LogClock.fileStamp.string(from: Date()))"
-                    saveNotice = nil
-                    showExporter = true
-                }
-                .disabled(appModel.game.log.isEmpty)
-                ShareLink(
-                    item: MovementLogTransfer(
-                        csv: appModel.game.csvText,
-                        filename: "movement-log.csv"
-                    ),
-                    preview: SharePreview("Movement log")
-                ) {
-                    Label("Download", systemImage: "square.and.arrow.down")
-                }
-                .disabled(appModel.game.log.isEmpty)
                 Button("Reset") {
                     lastTick = nil
                     appModel.game.resetSession()
+                    saveNotice = nil
                 }
                 .disabled(appModel.game.log.isEmpty && !appModel.game.isRunning)
-            }
-
-            if let saveNotice {
-                Text(saveNotice)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
             }
 
             FlatBox(game: appModel.game)
                 .frame(maxWidth: .infinity)
                 .frame(height: 360)
 
-            Text("Movement log")
-                .font(.headline)
-
-            logList
-
-            Text("Save log stores a CSV you can keep in Files. Download shares that same file.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+            logPanel
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -88,16 +59,16 @@ struct ContentView: View {
         }
         .fileExporter(
             isPresented: $showExporter,
-            document: exportDocument,
-            contentType: .commaSeparatedText,
-            defaultFilename: exportFilename
+            document: LogFile(text: exportText),
+            contentType: .plainText,
+            defaultFilename: "snake-movement-log"
         ) { result in
             switch result {
             case .success:
                 saveNotice = "Log saved."
             case .failure(let error):
                 let nsError = error as NSError
-                let cancelled = nsError.domain == NSCocoaErrorDomain && nsError.code == NSUserCancelledError
+                let cancelled = nsError.domain == NSCocoaErrorDomain && nsError.code == CocoaError.userCancelled.rawValue
                 if !cancelled {
                     saveNotice = "Could not save the log."
                 }
@@ -119,6 +90,46 @@ struct ContentView: View {
         lastTick = date
         guard delta > 0 else { return }
         appModel.game.tick(deltaTime: delta, now: date)
+    }
+
+    private var logPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Session log")
+                    .font(.headline)
+                Spacer()
+                Text("\(appModel.game.log.count)")
+                    .font(.subheadline.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("Written each time the snake moves or turns.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Button(action: beginExport) {
+                Label("Download log", systemImage: "arrow.down.doc")
+            }
+            .disabled(appModel.game.log.isEmpty)
+
+            if let saveNotice {
+                Text(saveNotice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
+            logList
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+    }
+
+    private func beginExport() {
+        guard !appModel.game.log.isEmpty else { return }
+        exportText = appModel.game.logText
+        showExporter = true
     }
 
     private var logList: some View {
@@ -212,8 +223,8 @@ private struct FlatBox: View {
     }
 }
 
-struct LogCSVDocument: FileDocument {
-    static var readableContentTypes: [UTType] { [.commaSeparatedText] }
+nonisolated struct LogFile: FileDocument {
+    static var readableContentTypes: [UTType] { [.plainText] }
 
     var text: String
 
@@ -230,18 +241,6 @@ struct LogCSVDocument: FileDocument {
 
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
         FileWrapper(regularFileWithContents: Data(text.utf8))
-    }
-}
-
-struct MovementLogTransfer: Transferable {
-    let csv: String
-    let filename: String
-
-    static var transferRepresentation: some TransferRepresentation {
-        DataRepresentation(exportedContentType: .commaSeparatedText) { item in
-            Data(item.csv.utf8)
-        }
-        .suggestedFileName(\.filename)
     }
 }
 
