@@ -21,11 +21,23 @@ struct ContentView: View {
             Text("Follow the Snake")
                 .font(.largeTitle)
 
-            Text("The object stays inside this flat 10×10 box. It only moves up, down, left, and right. Every move and turn is logged with a timestamp.")
+            Text("Speed starts at 2 and increases by 1 every 5 seconds. Each increase is written to the log.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            HStack(alignment: .center, spacing: 16) {
+            HStack(alignment: .center, spacing: 28) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Speed")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(speedText)
+                        .font(.system(size: 48, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .contentTransition(.numericText())
+                    Text("increases every 5 seconds")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 StatusItem(title: "Direction", value: directionText)
                 Button("Reset") {
                     lastTick = nil
@@ -80,6 +92,10 @@ struct ContentView: View {
         appModel.game.log.isEmpty ? "—" : appModel.game.direction.rawValue
     }
 
+    private var speedText: String {
+        String(format: "%.0f", appModel.game.speed)
+    }
+
     private func step(to date: Date) {
         if !appModel.game.isRunning {
             lastTick = date
@@ -103,7 +119,7 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text("Written each time the snake moves or turns.")
+            Text("Written each time the speed increases.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -164,6 +180,8 @@ struct ContentView: View {
         switch kind {
         case .moving:
             .secondary
+        case .increasedSpeed:
+            .orange
         case .session, .started, .changedDirection, .stopped:
             .primary
         }

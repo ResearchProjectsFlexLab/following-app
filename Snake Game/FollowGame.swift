@@ -39,6 +39,7 @@ enum MovementEventKind: String {
     case started
     case moving
     case changedDirection
+    case increasedSpeed
     case stopped
 }
 
@@ -104,10 +105,13 @@ final class FollowGame {
     static let maxTrailCount = 16
     static let boxSize = SIMD2<Float>(10, 10)
 
-    let speed: Float
+    private(set) var speed: Float
+    let speedStep: Float
+    let speedIncreaseInterval: TimeInterval
     let heartbeatInterval: TimeInterval
     let directionChangeInterval: TimeInterval
     let persistsLog: Bool
+    private let initialSpeed: Float
 
     private(set) var isRunning = false
     private(set) var direction: MoveDirection = .right
@@ -121,6 +125,7 @@ final class FollowGame {
     private var center = SIMD2<Float>(5, 5)
     private var halfExtents = SIMD2<Float>(5, 5)
     private var nextTurn: Date = .distantFuture
+    private var nextSpeedIncrease: Date = .distantFuture
     private var lastHeartbeat: Date = .distantPast
 
     var boundsMin: SIMD2<Float> { center - halfExtents }
@@ -132,7 +137,7 @@ final class FollowGame {
             "Snake Game log",
             "Generated: \(LogClock.string(from: log.last?.timestamp ?? .now))",
             "Entries: \(log.count)",
-            "A line is written each time the snake moves or turns.",
+            "A line is written each time the speed increases.",
             "",
         ]
         lines.append(contentsOf: log.map(\.line))
@@ -160,11 +165,16 @@ final class FollowGame {
 
     init(
         speed: Float = 2,
+        speedStep: Float = 1,
+        speedIncreaseInterval: TimeInterval = 5,
         heartbeatInterval: TimeInterval = 1,
         directionChangeInterval: TimeInterval = 3.2,
         persistsLog: Bool = true
     ) {
         self.speed = speed
+        self.initialSpeed = speed
+        self.speedStep = speedStep
+        self.speedIncreaseInterval = speedIncreaseInterval
         self.heartbeatInterval = heartbeatInterval
         self.directionChangeInterval = directionChangeInterval
         self.persistsLog = persistsLog
@@ -185,9 +195,11 @@ final class FollowGame {
             position = clampInside(SIMD2(2, 5))
         }
         direction = .right
+        speed = initialSpeed
         trail = []
         lastHeartbeat = now
         nextTurn = now.addingTimeInterval(directionChangeInterval)
+        nextSpeedIncrease = now.addingTimeInterval(speedIncreaseInterval)
         isRunning = true
         record(.session, at: now)
         record(.started, at: now)
@@ -202,6 +214,7 @@ final class FollowGame {
     /// Clears the on-screen log. The text file keeps earlier sessions.
     func resetSession() {
         isRunning = false
+        speed = initialSpeed
         log.removeAll()
         trail.removeAll()
     }
@@ -216,12 +229,14 @@ final class FollowGame {
             steps += 1
             let timeToHeartbeat = max(0, heartbeatInterval - time.timeIntervalSince(lastHeartbeat))
             let timeToTurn = max(0, nextTurn.timeIntervalSince(time))
+            let timeToSpeedIncrease = max(0, nextSpeedIncrease.timeIntervalSince(time))
             let runway = max(0, room(along: direction))
-            let timeToWall = TimeInterval(runway / speed)
-            let slice = min(remaining, timeToHeartbeat, timeToTurn, timeToWall)
+            let timeToWall = TimeInterval(runway / max(speed, 0.01))
+            let slice = min(remaining, timeToHeartbeat, timeToTurn, timeToSpeedIncrease, timeToWall)
 
             if slice > 0.00001 {
                 position += direction.vector * speed * Float(slice)
+                position = clampToBounds(position)
                 rememberPosition()
                 time = time.addingTimeInterval(slice)
                 remaining -= slice
@@ -243,9 +258,16 @@ final class FollowGame {
                 continue
             }
 
-            if time.timeIntervalSince(lastHeartbeat) >= heartbeatInterval - 0.001 {
+            let heartbeatDue = time.timeIntervalSince(lastHeartbeat) >= heartbeatInterval - 0.001
+            let speedDue = nextSpeedIncrease.timeIntervalSince(time) <= 0.001
+            if heartbeatDue {
                 record(.moving, at: time)
                 lastHeartbeat = time
+            }
+            if speedDue {
+                increaseSpeed(at: time)
+            }
+            if heartbeatDue || speedDue {
                 continue
             }
 
@@ -253,6 +275,13 @@ final class FollowGame {
                 break
             }
         }
+    }
+
+    private func increaseSpeed(at time: Date) {
+        let previous = speed
+        speed += speedStep
+        nextSpeedIncrease = time.addingTimeInterval(speedIncreaseInterval)
+        record(.increasedSpeed, previousSpeed: previous, at: time)
     }
 
     private func changeDirection(reason: TurnReason, at time: Date) {
@@ -297,6 +326,13 @@ final class FollowGame {
         return "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
     }
 
+    private func clampToBounds(_ point: SIMD2<Float>) -> SIMD2<Float> {
+        SIMD2(
+            min(max(point.x, center.x - halfExtents.x), center.x + halfExtents.x),
+            min(max(point.y, center.y - halfExtents.y), center.y + halfExtents.y)
+        )
+    }
+
     private func clampInside(_ point: SIMD2<Float>) -> SIMD2<Float> {
         let margin = edgeMargin
         return SIMD2(
@@ -318,10 +354,11 @@ final class FollowGame {
     private func record(
         _ kind: MovementEventKind,
         previous: MoveDirection? = nil,
+        previousSpeed: Float? = nil,
         turnReason: TurnReason? = nil,
         at now: Date
     ) {
-        let line = makeLine(kind: kind, previous: previous, turnReason: turnReason, at: now)
+        let line = makeLine(kind: kind, previous: previous, previousSpeed: previousSpeed, turnReason: turnReason, at: now)
         let entry = MovementLogEntry(
             id: UUID(),
             timestamp: now,
@@ -344,6 +381,7 @@ final class FollowGame {
     private func makeLine(
         kind: MovementEventKind,
         previous: MoveDirection?,
+        previousSpeed: Float?,
         turnReason: TurnReason?,
         at now: Date
     ) -> String {
@@ -360,8 +398,15 @@ final class FollowGame {
             let from = previous?.rawValue ?? "unknown"
             let why = turnReason?.rawValue ?? "turn"
             return "\(time)  changed direction  \(from) → \(direction.rawValue)  (\(why))  \(place)"
+        case .increasedSpeed:
+            let from = speedText(previousSpeed ?? speed - speedStep)
+            return "\(time)  speed increased  \(from) → \(speedText(speed))"
         case .stopped:
             return "\(time)  stopped  last direction \(direction.rawValue)  \(place)"
         }
+    }
+
+    private func speedText(_ value: Float) -> String {
+        String(format: "%.0f", value)
     }
 }
