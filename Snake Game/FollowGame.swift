@@ -13,8 +13,6 @@ import simd
 enum MoveDirection: String, CaseIterable {
     case up, down, left, right
 
-    static let turnOrder: [MoveDirection] = [.right, .up, .left, .down]
-
     var vector: SIMD2<Float> {
         switch self {
         case .up: SIMD2(0, 1)
@@ -137,7 +135,7 @@ final class FollowGame {
             "Snake Game log",
             "Generated: \(LogClock.string(from: log.last?.timestamp ?? .now))",
             "Entries: \(log.count)",
-            "A line is written each time the speed increases.",
+            "A line is written when the speed changes.",
             "",
         ]
         lines.append(contentsOf: log.map(\.line))
@@ -294,30 +292,25 @@ final class FollowGame {
         record(.changedDirection, previous: previous, turnReason: reason, at: time)
     }
 
+    /// Picks up, down, left, or right at random. A turn leaves the current axis when it can,
+    /// so the snake does not reverse and travel back and forth on the same line.
     private func nextDirection() -> MoveDirection {
-        // At an edge, head back across the box instead of sliding along the border.
-        if room(along: direction) <= minimumRunway {
-            let back = direction.opposite
-            if room(along: back) > minimumRunway {
-                return back
-            }
+        let turns = MoveDirection.allCases.filter { candidate in
+            candidate != direction
+                && candidate != direction.opposite
+                && room(along: candidate) > minimumRunway
+        }
+        if let turn = turns.randomElement() {
+            return turn
         }
 
-        let start = MoveDirection.turnOrder.firstIndex(of: direction) ?? 0
-        var fallback = direction.opposite
-        var fallbackRoom: Float = -1
-        for offset in 1...MoveDirection.turnOrder.count {
-            let candidate = MoveDirection.turnOrder[(start + offset) % MoveDirection.turnOrder.count]
-            let space = room(along: candidate)
-            if space > fallbackRoom {
-                fallbackRoom = space
-                fallback = candidate
-            }
-            if space > minimumRunway {
-                return candidate
-            }
+        let anywhere = MoveDirection.allCases.filter { candidate in
+            candidate != direction && room(along: candidate) > minimumRunway
         }
-        return fallback == direction ? direction.opposite : fallback
+        if let turn = anywhere.randomElement() {
+            return turn
+        }
+        return direction.opposite
     }
 
     private func room(along direction: MoveDirection) -> Float {
@@ -408,7 +401,7 @@ final class FollowGame {
             return "\(time)  changed direction  \(from) → \(direction.rawValue)  (\(why))  \(place)"
         case .increasedSpeed:
             let from = speedText(previousSpeed ?? speed - speedStep)
-            return "\(time)  speed increased  \(from) → \(speedText(speed))"
+            return "\(time)  speed changed from \(from) to \(speedText(speed))"
         case .stopped:
             return "\(time)  stopped  last direction \(direction.rawValue)  \(place)"
         }

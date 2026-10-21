@@ -97,8 +97,8 @@ struct Snake_GameTests {
 
         let change = game.log.last { $0.kind == .changedDirection }
         #expect(change?.previousDirection == .right)
-        #expect(change?.direction == .up)
-        #expect(change?.line.contains("changed direction  right → up") == true)
+        #expect(change?.direction == .up || change?.direction == .down)
+        #expect(change?.line.contains("changed direction  right → \(change!.direction.rawValue)") == true)
         #expect(change?.line.contains("scheduled turn") == true)
         #expect(change?.line.hasPrefix(LogClock.string(from: change!.timestamp)) == true)
         #expect(game.log.filter { $0.kind == .moving && $0.direction == .right }.count == 3)
@@ -119,15 +119,17 @@ struct Snake_GameTests {
         #expect(game.speed == 3)
         let firstIncrease = game.log.filter { $0.kind == .increasedSpeed }
         #expect(firstIncrease.count == 1)
-        #expect(firstIncrease[0].line.contains("speed increased  2 → 3"))
+        #expect(firstIncrease[0].line.contains("speed changed from 2 to 3"))
         #expect(firstIncrease[0].line.hasPrefix(LogClock.string(from: firstIncrease[0].timestamp)))
 
         game.tick(deltaTime: 10, now: start.addingTimeInterval(20))
         #expect(game.speed == 4)
         let increases = game.log.filter { $0.kind == .increasedSpeed }
         #expect(increases.count == 2)
-        #expect(increases[1].line.contains("speed increased  3 → 4"))
-        #expect(game.logText.contains("speed increased  2 → 3"))
+        #expect(increases[1].line.contains("speed changed from 3 to 4"))
+        #expect(game.logText.contains("speed changed from 2 to 3"))
+        #expect(game.logText.contains("speed changed from 3 to 4"))
+        #expect(game.logText.contains("A line is written when the speed changes."))
     }
 
     @Test func hittingTheEdgeLogsADirectionChange() {
@@ -135,12 +137,12 @@ struct Snake_GameTests {
         let start = Date(timeIntervalSince1970: 1_700_000_000)
         game.start(at: start, halfExtents: SIMD2(0.4, 0.4))
 
-        game.tick(deltaTime: 2, now: start.addingTimeInterval(2))
+        game.tick(deltaTime: 0.5, now: start.addingTimeInterval(0.5))
 
-        let change = game.log.last { $0.kind == .changedDirection }
+        let change = game.log.first { $0.kind == .changedDirection }
         #expect(change?.previousDirection == .right)
-        #expect(change?.direction == .left)
-        #expect(change?.line.contains("right → left") == true)
+        #expect(change?.direction == .up || change?.direction == .down)
+        #expect(change?.line.contains("right → \(change!.direction.rawValue)") == true)
         #expect(change?.line.contains("reached the edge") == true)
         #expect(change?.line.hasPrefix(LogClock.string(from: change!.timestamp)) == true)
         #expect(isInside(game.position, game: game))
