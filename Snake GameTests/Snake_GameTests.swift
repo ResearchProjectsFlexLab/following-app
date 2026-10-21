@@ -104,25 +104,25 @@ struct Snake_GameTests {
         #expect(game.log.filter { $0.kind == .moving && $0.direction == .right }.count == 3)
     }
 
-    @Test func speedIncreasesEveryFiveSecondsAndIsLogged() {
+    @Test func speedStaysTheSameForTenSecondsThenIncreases() {
         let game = makeGame()
         let start = Date(timeIntervalSince1970: 1_700_000_000)
         game.start(at: start, halfExtents: SIMD2(10, 10))
         #expect(game.speed == 2)
-        #expect(game.speedIncreaseInterval == 5)
+        #expect(game.speedIncreaseInterval == 10)
 
-        game.tick(deltaTime: 4.9, now: start.addingTimeInterval(4.9))
+        game.tick(deltaTime: 9.9, now: start.addingTimeInterval(9.9))
         #expect(game.speed == 2)
         #expect(game.log.contains { $0.kind == .increasedSpeed } == false)
 
-        game.tick(deltaTime: 0.1, now: start.addingTimeInterval(5))
+        game.tick(deltaTime: 0.1, now: start.addingTimeInterval(10))
         #expect(game.speed == 3)
         let firstIncrease = game.log.filter { $0.kind == .increasedSpeed }
         #expect(firstIncrease.count == 1)
         #expect(firstIncrease[0].line.contains("speed increased  2 → 3"))
         #expect(firstIncrease[0].line.hasPrefix(LogClock.string(from: firstIncrease[0].timestamp)))
 
-        game.tick(deltaTime: 5, now: start.addingTimeInterval(10))
+        game.tick(deltaTime: 10, now: start.addingTimeInterval(20))
         #expect(game.speed == 4)
         let increases = game.log.filter { $0.kind == .increasedSpeed }
         #expect(increases.count == 2)
@@ -139,7 +139,8 @@ struct Snake_GameTests {
 
         let change = game.log.last { $0.kind == .changedDirection }
         #expect(change?.previousDirection == .right)
-        #expect(change?.direction != .right)
+        #expect(change?.direction == .left)
+        #expect(change?.line.contains("right → left") == true)
         #expect(change?.line.contains("reached the edge") == true)
         #expect(change?.line.hasPrefix(LogClock.string(from: change!.timestamp)) == true)
         #expect(isInside(game.position, game: game))

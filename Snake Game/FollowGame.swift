@@ -166,7 +166,7 @@ final class FollowGame {
     init(
         speed: Float = 2,
         speedStep: Float = 1,
-        speedIncreaseInterval: TimeInterval = 5,
+        speedIncreaseInterval: TimeInterval = 10,
         heartbeatInterval: TimeInterval = 1,
         directionChangeInterval: TimeInterval = 3.2,
         persistsLog: Bool = true
@@ -211,7 +211,7 @@ final class FollowGame {
         isRunning = false
     }
 
-    /// Clears the on-screen log. The text file keeps earlier sessions.
+    /// Clears the recorded session. The text file keeps earlier sessions.
     func resetSession() {
         isRunning = false
         speed = initialSpeed
@@ -295,6 +295,14 @@ final class FollowGame {
     }
 
     private func nextDirection() -> MoveDirection {
+        // At an edge, head back across the box instead of sliding along the border.
+        if room(along: direction) <= minimumRunway {
+            let back = direction.opposite
+            if room(along: back) > minimumRunway {
+                return back
+            }
+        }
+
         let start = MoveDirection.turnOrder.firstIndex(of: direction) ?? 0
         var fallback = direction.opposite
         var fallbackRoom: Float = -1
@@ -305,7 +313,7 @@ final class FollowGame {
                 fallbackRoom = space
                 fallback = candidate
             }
-            if candidate != direction.opposite && space > minimumRunway {
+            if space > minimumRunway {
                 return candidate
             }
         }

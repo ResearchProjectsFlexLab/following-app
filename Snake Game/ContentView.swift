@@ -12,18 +12,40 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @Environment(AppModel.self) private var appModel
     @State private var lastTick: Date?
+    @State private var isStopped = false
     @State private var exportText = ""
     @State private var showExporter = false
     @State private var saveNotice: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Follow the Snake")
-                .font(.largeTitle)
+            HStack(alignment: .center, spacing: 12) {
+                Text("Follow the Snake")
+                    .font(.largeTitle)
+                Spacer()
+                Button(action: stopGame) {
+                    Label("Stop", systemImage: "stop.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!appModel.game.isRunning)
+                Button(action: beginExport) {
+                    Image(systemName: "square.and.arrow.down")
+                        .font(.title3)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityLabel("Save")
+                .disabled(appModel.game.log.isEmpty)
+            }
 
-            Text("Speed starts at 2 and increases by 1 every 5 seconds. Each increase is written to the log.")
+            Text("Speed starts at 2 and stays the same for 10 seconds, then increases by 1.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            if let saveNotice {
+                Text(saveNotice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             HStack(alignment: .center, spacing: 28) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -34,12 +56,13 @@ struct ContentView: View {
                         .font(.system(size: 48, weight: .semibold, design: .rounded))
                         .monospacedDigit()
                         .contentTransition(.numericText())
-                    Text("increases every 5 seconds")
+                    Text("same speed for 10 seconds")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 StatusItem(title: "Direction", value: directionText)
                 Button("Reset") {
+                    isStopped = false
                     lastTick = nil
                     appModel.game.resetSession()
                     saveNotice = nil
@@ -48,10 +71,8 @@ struct ContentView: View {
             }
 
             FlatBox(game: appModel.game)
-                .frame(maxWidth: .infinity)
-                .frame(height: 360)
-
-            logPanel
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minHeight: 360)
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -73,19 +94,25 @@ struct ContentView: View {
             isPresented: $showExporter,
             document: LogFile(text: exportText),
             contentType: .plainText,
-            defaultFilename: "snake-movement-log"
+            defaultFilename: "snake-movement"
         ) { result in
             switch result {
             case .success:
-                saveNotice = "Log saved."
+                saveNotice = "Saved."
             case .failure(let error):
                 let nsError = error as NSError
                 let cancelled = nsError.domain == NSCocoaErrorDomain && nsError.code == CocoaError.userCancelled.rawValue
                 if !cancelled {
-                    saveNotice = "Could not save the log."
+                    saveNotice = "Could not save."
                 }
             }
         }
+    }
+
+    private func stopGame() {
+        isStopped = true
+        lastTick = nil
+        appModel.game.stop()
     }
 
     private var directionText: String {
@@ -97,6 +124,10 @@ struct ContentView: View {
     }
 
     private func step(to date: Date) {
+        if isStopped {
+            lastTick = date
+            return
+        }
         if !appModel.game.isRunning {
             lastTick = date
             appModel.game.start(at: date)
@@ -108,84 +139,12 @@ struct ContentView: View {
         appModel.game.tick(deltaTime: delta, now: date)
     }
 
-    private var logPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Session log")
-                    .font(.headline)
-                Spacer()
-                Text("\(appModel.game.log.count)")
-                    .font(.subheadline.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-
-            Text("Written each time the speed increases.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Button(action: beginExport) {
-                Label("Download log", systemImage: "arrow.down.doc")
-            }
-            .disabled(appModel.game.log.isEmpty)
-
-            if let saveNotice {
-                Text(saveNotice)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Divider()
-            logList
-        }
-        .padding(18)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-    }
-
     private func beginExport() {
         guard !appModel.game.log.isEmpty else { return }
         exportText = appModel.game.logText
         showExporter = true
     }
 
-    private var logList: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 6) {
-                    if appModel.game.log.isEmpty {
-                        Text("The log starts as soon as the object moves.")
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(appModel.game.log) { entry in
-                            Text(entry.line)
-                                .font(.system(.caption, design: .monospaced))
-                                .foregroundStyle(color(for: entry.kind))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .id(entry.id)
-                        }
-                    }
-                }
-                .padding(.vertical, 4)
-            }
-            .onChange(of: appModel.game.log.count) { _, _ in
-                guard let last = appModel.game.log.last else { return }
-                proxy.scrollTo(last.id, anchor: .bottom)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func color(for kind: MovementEventKind) -> Color {
-        switch kind {
-        case .moving:
-            .secondary
-        case .increasedSpeed:
-            .orange
-        case .session, .started, .changedDirection, .stopped:
-            .primary
-        }
-    }
 }
 
 private struct FlatBox: View {
