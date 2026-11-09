@@ -11,5 +11,14 @@ import SwiftUI
 @MainActor
 @Observable
 class AppModel {
-    let game = FollowGame()
+    static let controlWindowID = "control"
+    static let immersiveSpaceID = "tracking-space"
+
+    let session = SessionController()
+    var immersiveSpaceIsOpen = false
+    var controlWindowIsOpen = false
+    /// Set while Start waits for the immersive space; the space begins the session when it appears.
+    var isOpeningSpace = false
+
+    var game: FollowGame { session.game }
 }

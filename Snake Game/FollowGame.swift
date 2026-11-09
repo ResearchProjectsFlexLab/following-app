@@ -22,6 +22,17 @@ enum MoveDirection: String, CaseIterable {
         }
     }
 
+    var clockwise: MoveDirection {
+        switch self {
+        case .up: .right
+        case .right: .down
+        case .down: .left
+        case .left: .up
+        }
+    }
+
+    var counterClockwise: MoveDirection { clockwise.opposite }
+
     var opposite: MoveDirection {
         switch self {
         case .up: .down
@@ -39,11 +50,13 @@ enum MovementEventKind: String {
     case changedDirection
     case increasedSpeed
     case stopped
+    /// A protocol marker (phase boundary, rating, sync point) written by `SessionController`.
+    case marker
 }
 
 enum TurnReason: String {
     case edge = "reached the edge"
-    case timer = "scheduled turn"
+    case timer = "random turn"
 }
 
 struct MovementLogEntry: Identifiable {
@@ -53,7 +66,14 @@ struct MovementLogEntry: Identifiable {
     let direction: MoveDirection
     let previousDirection: MoveDirection?
     let position: SIMD2<Float>
+    let speed: Float
+    /// Seconds since the first entry of this session (monotonic within a session).
+    let elapsed: TimeInterval
+    let note: String?
     let line: String
+
+    /// Milliseconds since 1970-01-01 UTC, for aligning with ECG/EDA/PPG streams.
+    var unixMillis: Int64 { LogClock.unixMillis(timestamp) }
 }
 
 enum LogClock {
@@ -68,18 +88,33 @@ enum LogClock {
         formatter.string(from: date)
     }
 
+    static func unixMillis(_ date: Date) -> Int64 {
+        Int64((date.timeIntervalSince1970 * 1000).rounded())
+    }
+
+    /// UTC offset of the device clock, e.g. "-05:00".
+    static var utcOffset: String {
+        let seconds = TimeZone.current.secondsFromGMT()
+        let sign = seconds < 0 ? "-" : "+"
+        let magnitude = abs(seconds)
+        return String(format: "%@%02d:%02d", sign, magnitude / 3600, (magnitude % 3600) / 60)
+    }
+
     static let fileStamp: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
         return formatter
     }()
 }
 
 enum MovementLogFile {
     static var fileURL: URL? {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("movement-log.txt")
+        // Running crash-safe copy of every line; kept out of the main folder.
+        guard let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("Sessions", isDirectory: true) else { return nil }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("movement-log.txt")
     }
 
     static func append(_ line: String) {
@@ -107,7 +142,10 @@ final class FollowGame {
     let speedStep: Float
     let speedIncreaseInterval: TimeInterval
     let heartbeatInterval: TimeInterval
-    let directionChangeInterval: TimeInterval
+    /// How far (in box units) the snake travels before a random turn. Drawn fresh after every turn.
+    let turnDistance: ClosedRange<Float>
+    /// Speed never goes above this, so a ramp can end at a known peak.
+    let maxSpeed: Float
     let persistsLog: Bool
     private let initialSpeed: Float
 
@@ -122,9 +160,10 @@ final class FollowGame {
     private let movementLogger = Logger(subsystem: "FlexLab.Snake-Game", category: "Movement")
     private var center = SIMD2<Float>(5, 5)
     private var halfExtents = SIMD2<Float>(5, 5)
-    private var nextTurn: Date = .distantFuture
+    private var distanceToTurn: Float = .infinity
     private var nextSpeedIncrease: Date = .distantFuture
     private var lastHeartbeat: Date = .distantPast
+    private var origin: Date?
 
     var boundsMin: SIMD2<Float> { center - halfExtents }
     var boundsMax: SIMD2<Float> { center + halfExtents }
@@ -135,6 +174,7 @@ final class FollowGame {
             "Snake Game log",
             "Generated: \(LogClock.string(from: log.last?.timestamp ?? .now))",
             "Entries: \(log.count)",
+            "Clock: device local time, UTC\(LogClock.utcOffset). The CSV export also has unix_ms for sensor alignment.",
             "A line is written when the speed changes.",
             "",
         ]
@@ -144,16 +184,19 @@ final class FollowGame {
 
     /// Spreadsheet export of every logged event, including timestamps.
     var csvText: String {
-        var rows = ["timestamp,event,direction,previous_direction,x,y,message"]
+        var rows = ["unix_ms,timestamp,elapsed_s,event,direction,previous_direction,x,y,speed,message"]
         rows.reserveCapacity(log.count + 1)
         for entry in log {
             let fields = [
+                String(entry.unixMillis),
                 LogClock.string(from: entry.timestamp),
+                String(format: "%.3f", entry.elapsed),
                 entry.kind.rawValue,
                 entry.direction.rawValue,
                 entry.previousDirection?.rawValue ?? "",
                 String(format: "%.2f", entry.position.x),
                 String(format: "%.2f", entry.position.y),
+                String(format: "%.2f", entry.speed),
                 entry.line
             ]
             rows.append(fields.map(Self.csvField).joined(separator: ","))
@@ -166,7 +209,8 @@ final class FollowGame {
         speedStep: Float = 1,
         speedIncreaseInterval: TimeInterval = 10,
         heartbeatInterval: TimeInterval = 1,
-        directionChangeInterval: TimeInterval = 3.2,
+        turnDistance: ClosedRange<Float> = 1.5...4.5,
+        maxSpeed: Float = .infinity,
         persistsLog: Bool = true
     ) {
         self.speed = speed
@@ -174,7 +218,8 @@ final class FollowGame {
         self.speedStep = speedStep
         self.speedIncreaseInterval = speedIncreaseInterval
         self.heartbeatInterval = heartbeatInterval
-        self.directionChangeInterval = directionChangeInterval
+        self.turnDistance = turnDistance
+        self.maxSpeed = maxSpeed
         self.persistsLog = persistsLog
     }
 
@@ -196,7 +241,7 @@ final class FollowGame {
         speed = initialSpeed
         trail = []
         lastHeartbeat = now
-        nextTurn = now.addingTimeInterval(directionChangeInterval)
+        distanceToTurn = Float.random(in: turnDistance)
         nextSpeedIncrease = now.addingTimeInterval(speedIncreaseInterval)
         isRunning = true
         record(.session, at: now)
@@ -215,6 +260,12 @@ final class FollowGame {
         speed = initialSpeed
         log.removeAll()
         trail.removeAll()
+        origin = nil
+    }
+
+    /// Writes a protocol marker (phase start/end, rating, sync point) into the same timeline.
+    func mark(_ label: String, at now: Date = .now) {
+        record(.marker, note: label, at: now)
     }
 
     func tick(deltaTime: TimeInterval, now: Date) {
@@ -226,14 +277,16 @@ final class FollowGame {
         while remaining > 0.0001 && steps < 64 {
             steps += 1
             let timeToHeartbeat = max(0, heartbeatInterval - time.timeIntervalSince(lastHeartbeat))
-            let timeToTurn = max(0, nextTurn.timeIntervalSince(time))
+            let timeToTurn = TimeInterval(max(0, distanceToTurn) / max(speed, 0.01))
             let timeToSpeedIncrease = max(0, nextSpeedIncrease.timeIntervalSince(time))
             let runway = max(0, room(along: direction))
             let timeToWall = TimeInterval(runway / max(speed, 0.01))
             let slice = min(remaining, timeToHeartbeat, timeToTurn, timeToSpeedIncrease, timeToWall)
 
             if slice > 0.00001 {
-                position += direction.vector * speed * Float(slice)
+                let step: Float = speed * Float(slice)
+                position += direction.vector * step
+                distanceToTurn -= step
                 position = clampToBounds(position)
                 rememberPosition()
                 time = time.addingTimeInterval(slice)
@@ -251,7 +304,7 @@ final class FollowGame {
                 continue
             }
 
-            if nextTurn.timeIntervalSince(time) <= 0.001 {
+            if distanceToTurn <= 0.001 {
                 changeDirection(reason: .timer, at: time)
                 continue
             }
@@ -277,7 +330,7 @@ final class FollowGame {
 
     private func increaseSpeed(at time: Date) {
         let previous = speed
-        speed += speedStep
+        speed = min(speed + speedStep, maxSpeed)
         nextSpeedIncrease = time.addingTimeInterval(speedIncreaseInterval)
         record(.increasedSpeed, previousSpeed: previous, at: time)
     }
@@ -285,22 +338,31 @@ final class FollowGame {
     private func changeDirection(reason: TurnReason, at time: Date) {
         let previous = direction
         let newDirection = nextDirection()
-        guard newDirection != previous else { return }
+        guard newDirection != previous else {
+            distanceToTurn = Float.random(in: turnDistance)
+            return
+        }
         direction = newDirection
-        nextTurn = time.addingTimeInterval(directionChangeInterval)
+        // After bouncing off a wall the snake is running along it; turn back inward soon
+        // so it explores the whole board instead of tracing the edge.
+        let hugsWall = room(along: newDirection.clockwise) < 1 || room(along: newDirection.counterClockwise) < 1
+        distanceToTurn = reason == .edge && hugsWall
+            ? Float.random(in: 0.6...max(0.6, turnDistance.lowerBound))
+            : Float.random(in: turnDistance)
         lastHeartbeat = time
         record(.changedDirection, previous: previous, turnReason: reason, at: time)
     }
 
-    /// Picks up, down, left, or right at random. A turn leaves the current axis when it can,
-    /// so the snake does not reverse and travel back and forth on the same line.
+    /// Picks a new direction at random. A turn leaves the current axis when it can (no reversing
+    /// along the same line), and directions with more open space are more likely, which pulls
+    /// the snake toward the middle instead of letting it circle the edge.
     private func nextDirection() -> MoveDirection {
         let turns = MoveDirection.allCases.filter { candidate in
             candidate != direction
                 && candidate != direction.opposite
                 && room(along: candidate) > minimumRunway
         }
-        if let turn = turns.randomElement() {
+        if let turn = weightedByRoom(turns) {
             return turn
         }
 
@@ -311,6 +373,19 @@ final class FollowGame {
             return turn
         }
         return direction.opposite
+    }
+
+    private func weightedByRoom(_ candidates: [MoveDirection]) -> MoveDirection? {
+        guard !candidates.isEmpty else { return nil }
+        let weights: [Float] = candidates.map { room(along: $0) }
+        let total: Float = weights.reduce(0, +)
+        guard total > 0 else { return candidates.randomElement() }
+        var pick: Float = Float.random(in: 0..<total)
+        for (candidate, weight) in zip(candidates, weights) {
+            if pick < weight { return candidate }
+            pick -= weight
+        }
+        return candidates.last
     }
 
     private func room(along direction: MoveDirection) -> Float {
@@ -357,9 +432,11 @@ final class FollowGame {
         previous: MoveDirection? = nil,
         previousSpeed: Float? = nil,
         turnReason: TurnReason? = nil,
+        note: String? = nil,
         at now: Date
     ) {
-        let line = makeLine(kind: kind, previous: previous, previousSpeed: previousSpeed, turnReason: turnReason, at: now)
+        if origin == nil { origin = now }
+        let line = makeLine(kind: kind, previous: previous, previousSpeed: previousSpeed, turnReason: turnReason, note: note, at: now)
         let entry = MovementLogEntry(
             id: UUID(),
             timestamp: now,
@@ -367,11 +444,14 @@ final class FollowGame {
             direction: direction,
             previousDirection: previous,
             position: position,
+            speed: speed,
+            elapsed: now.timeIntervalSince(origin ?? now),
+            note: note,
             line: line
         )
         log.append(entry)
-        if log.count > 1000 {
-            log.removeFirst(log.count - 1000)
+        if log.count > 50_000 {
+            log.removeFirst(log.count - 50_000)
         }
         movementLogger.info("\(line, privacy: .public)")
         if persistsLog {
@@ -384,6 +464,7 @@ final class FollowGame {
         previous: MoveDirection?,
         previousSpeed: Float?,
         turnReason: TurnReason?,
+        note: String?,
         at now: Date
     ) -> String {
         let time = LogClock.string(from: now)
@@ -404,10 +485,12 @@ final class FollowGame {
             return "\(time)  speed changed from \(from) to \(speedText(speed))"
         case .stopped:
             return "\(time)  stopped  last direction \(direction.rawValue)  \(place)"
+        case .marker:
+            return "\(time)  [marker] \(note ?? "")"
         }
     }
 
     private func speedText(_ value: Float) -> String {
-        String(format: "%.0f", value)
+        value.rounded() == value ? String(format: "%.0f", value) : String(format: "%.1f", value)
     }
 }

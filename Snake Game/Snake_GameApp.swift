@@ -11,12 +11,19 @@ import SwiftUI
 struct Snake_GameApp: App {
 
     @State private var appModel = AppModel()
+    @State private var immersionStyle: any ImmersionStyle = FullImmersionStyle.full
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup(id: AppModel.controlWindowID) {
             ContentView()
                 .environment(appModel)
         }
-        .defaultSize(width: 720, height: 820)
+        .defaultSize(width: 620, height: 560)
+
+        ImmersiveSpace(id: AppModel.immersiveSpaceID) {
+            ImmersiveView()
+                .environment(appModel)
+        }
+        .immersionStyle(selection: $immersionStyle, in: .full)
     }
 }

@@ -64,11 +64,27 @@ struct Snake_GameTests {
 
         let csv = game.csvText
         let lines = csv.split(separator: "\n", omittingEmptySubsequences: false)
-        #expect(lines[0] == "timestamp,event,direction,previous_direction,x,y,message")
+        #expect(lines[0] == "unix_ms,timestamp,elapsed_s,event,direction,previous_direction,x,y,speed,message")
         let started = lines.first { $0.contains(",started,right,") }
         #expect(started != nil)
         #expect(started?.contains(LogClock.string(from: start)) == true)
         #expect(started?.contains("started moving right") == true)
+        #expect(started?.hasPrefix("1700000000000,") == true)
+    }
+
+    @Test func markersShareTheTimelineWithElapsedSeconds() {
+        let game = makeGame()
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        game.mark("baseline_start", at: start)
+        game.start(at: start.addingTimeInterval(30), halfExtents: SIMD2(10, 10))
+
+        let marker = game.log.first { $0.kind == .marker }
+        #expect(marker?.note == "baseline_start")
+        #expect(marker?.elapsed == 0)
+        #expect(marker?.unixMillis == 1_700_000_000_000)
+        let started = game.log.first { $0.kind == .started }
+        #expect(started?.elapsed == 30)
+        #expect(game.csvText.contains(",marker,"))
     }
 
     @Test func continuedMovementIsLoggedEverySecond() {
@@ -99,7 +115,7 @@ struct Snake_GameTests {
         #expect(change?.previousDirection == .right)
         #expect(change?.direction == .up || change?.direction == .down)
         #expect(change?.line.contains("changed direction  right → \(change!.direction.rawValue)") == true)
-        #expect(change?.line.contains("scheduled turn") == true)
+        #expect(change?.line.contains("random turn") == true)
         #expect(change?.line.hasPrefix(LogClock.string(from: change!.timestamp)) == true)
         #expect(game.log.filter { $0.kind == .moving && $0.direction == .right }.count == 3)
     }
@@ -148,12 +164,42 @@ struct Snake_GameTests {
         #expect(isInside(game.position, game: game))
     }
 
+    @Test func speedRampStopsAtThePeak() {
+        let game = FollowGame(speed: 2, speedStep: 3, maxSpeed: 6, persistsLog: false)
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        game.start(at: start, halfExtents: SIMD2(10, 10))
+        game.tick(deltaTime: 10, now: start.addingTimeInterval(10))
+        #expect(game.speed == 5)
+        game.tick(deltaTime: 10, now: start.addingTimeInterval(20))
+        #expect(game.speed == 6)
+        #expect(game.log.last { $0.kind == .increasedSpeed }?.line.contains("speed changed from 5 to 6") == true)
+    }
+
+    @Test func randomTurnsVisitTheMiddleOfTheBoard() {
+        let game = FollowGame(speed: 4, persistsLog: false)
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        game.start(at: start)
+        var visitedMiddle = false
+        for second in 1...60 {
+            for step in 1...20 {
+                let now = start.addingTimeInterval(Double(second - 1) + Double(step) * 0.05)
+                game.tick(deltaTime: 0.05, now: now)
+                let p = game.position
+                if p.x > 3, p.x < 7, p.y > 3, p.y < 7 { visitedMiddle = true }
+                #expect(isInside(p, game: game))
+            }
+        }
+        #expect(visitedMiddle)
+        #expect(game.log.filter { $0.kind == .changedDirection }.count > 20)
+    }
+
     private func isInside(_ position: SIMD2<Float>, game: FollowGame) -> Bool {
         position.x >= game.boundsMin.x && position.x <= game.boundsMax.x
             && position.y >= game.boundsMin.y && position.y <= game.boundsMax.y
     }
 
     private func makeGame() -> FollowGame {
-        FollowGame(persistsLog: false)
+        // A fixed turn distance (2 units/s × 3.2 s) keeps the timing tests deterministic.
+        FollowGame(turnDistance: 6.4...6.4, persistsLog: false)
     }
 }
