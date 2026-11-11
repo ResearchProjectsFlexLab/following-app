@@ -2,8 +2,9 @@
 //  ImmersiveView.swift
 //  Snake Game
 //
-//  Full immersion: the participant sits under a starry night sky with a glowing grid floor,
-//  facing a large board ~2 m away (about 50° wide), and follows a glowing 3D snake.
+//  Full immersion under a starry night sky. During the rests the participant sits by a moonlit
+//  lake (LakeScene); during the game the lake fades to a glowing grid floor and a board
+//  ~2.4 m away (about 35° wide) where they follow a glowing 3D snake.
 //
 
 import ARKit
@@ -43,8 +44,16 @@ struct ImmersiveView: View {
             if appModel.isOpeningSpace {
                 appModel.isOpeningSpace = false
                 appModel.session.begin()
-                // Nothing should float between the participant and the board.
+                // Nothing should float between the participant and the scene.
                 dismissWindow(id: AppModel.controlWindowID)
+                #if DEBUG
+                if ProcessInfo.processInfo.arguments.contains("-autostart") {
+                    Task {
+                        try? await Task.sleep(for: .seconds(3))
+                        appModel.session.startBaseline()
+                    }
+                }
+                #endif
             } else if !(appModel.session.isActive && appModel.session.runsImmersive) {
                 // Opened without a session (e.g. restored by the system): don't trap the participant in it.
                 Task { await dismissImmersiveSpace() }
@@ -82,6 +91,12 @@ final class TrackingStage {
     private var lastHeadSample: Date = .distantPast
 
     private let board = Entity()
+    /// Board, glow and grid floor: shown for the countdown and the game.
+    private let gameGroup = Entity()
+    private let lake = LakeScene()
+    private let instructions = Entity()
+    private let restHUD = Entity()
+    private var lastSync: Date?
     private let head: ModelEntity
     private let halo: ModelEntity
     private var body: [ModelEntity] = []
@@ -107,11 +122,22 @@ final class TrackingStage {
                 materials: [Self.unlit(texture: floorTexture)]
             )
             floor.position.y = 0.001
-            root.addChild(floor)
+            gameGroup.addChild(floor)
         }
 
         board.position = Self.boardPosition
-        root.addChild(board)
+        gameGroup.addChild(board)
+        gameGroup.components.set(OpacityComponent(opacity: 0))
+        gameGroup.isEnabled = false
+        root.addChild(gameGroup)
+
+        lake.root.components.set(OpacityComponent(opacity: 0))
+        root.addChild(lake.root)
+
+        instructions.position = [0, 1.15, -1.6]
+        root.addChild(instructions)
+        restHUD.position = [0, 0.95, -2.6]
+        root.addChild(restHUD)
 
         // Soft cyan glow behind the board.
         if let glowTexture = Self.texture(size: 256, draw: Self.drawRadialGlow) {
@@ -177,17 +203,35 @@ final class TrackingStage {
     func attachHUD(session: SessionController) {
         countdownHUD.components.set(ViewAttachmentComponent(rootView: CountdownHUD(session: session)))
         progressHUD.components.set(ViewAttachmentComponent(rootView: ProgressHUD(session: session)))
+        instructions.components.set(ViewAttachmentComponent(rootView: BaselineInstructionsCard(session: session)))
+        restHUD.components.set(ViewAttachmentComponent(rootView: RestHUD(session: session)))
     }
 
     func sync(with session: SessionController) {
         let phase = session.phase
+        let now = Date()
+        let dt: Float = Float(min(0.1, now.timeIntervalSince(lastSync ?? now)))
+        lastSync = now
         if phase != lastPhase {
             if phase == .task { path.removeAll() }
             lastPhase = phase
         }
+
+        // The lake shows for the instructions and both rests; the game scene for the countdown and game.
+        let showsGame = phase == .countdown || phase == .task
+        Self.fade(gameGroup, toward: showsGame ? 1 : 0, dt: dt)
+        Self.fade(lake.root, toward: showsGame ? 0 : 1, dt: dt)
+        if lake.root.isEnabled { lake.update(session: session, now: now) }
+        instructions.isEnabled = phase == .ready
+        restHUD.isEnabled = phase.isRest
+
         countdownHUD.isEnabled = phase == .countdown
         progressHUD.isEnabled = phase == .task
         head.isEnabled = phase == .task
+
+        if phase.isRest {
+            recordHead(target: LakeScene.fixationPoint, session: session)
+        }
 
         guard phase == .task else {
             body.forEach { $0.isEnabled = false }
@@ -197,7 +241,7 @@ final class TrackingStage {
         let game = session.game
         let position = point(game.position, in: game, z: 0.04)
         head.position = position
-        recordHead(snakeWorld: Self.boardPosition + position, session: session)
+        recordHead(target: Self.boardPosition + position, session: session)
         let seconds: Float = Float(Date().timeIntervalSince(startTime))
         let pulse: Float = 1 + 0.15 * sin(seconds * 5)
         halo.scale = SIMD3<Float>(repeating: pulse)
@@ -225,8 +269,18 @@ final class TrackingStage {
         }
     }
 
-    /// About 20 samples per second of where the head points, compared with where the snake is.
-    private func recordHead(snakeWorld: SIMD3<Float>, session: SessionController) {
+    /// Fades an entity's opacity toward a target over about two-thirds of a second, hiding it at zero.
+    private static func fade(_ entity: Entity, toward target: Float, dt: Float) {
+        let current: Float = entity.components[OpacityComponent.self]?.opacity ?? 1
+        let step: Float = dt * 1.5
+        let next: Float = current < target ? min(target, current + step) : max(target, current - step)
+        entity.components.set(OpacityComponent(opacity: next))
+        entity.isEnabled = next > 0.001
+    }
+
+    /// About 20 samples per second of where the head points, compared with where it should be looking
+    /// (the snake during the game, the moon's reflection during the rests).
+    private func recordHead(target: SIMD3<Float>, session: SessionController) {
         let now = Date()
         guard now.timeIntervalSince(lastHeadSample) >= 0.05, let pose = headTracker.pose() else { return }
         lastHeadSample = now
@@ -234,14 +288,14 @@ final class TrackingStage {
         let c2 = pose.columns.2
         let headPosition = SIMD3<Float>(c3.x, c3.y, c3.z)
         let forward: SIMD3<Float> = simd_normalize(SIMD3<Float>(-c2.x, -c2.y, -c2.z))
-        let toSnake: SIMD3<Float> = simd_normalize(snakeWorld - headPosition)
+        let toSnake: SIMD3<Float> = simd_normalize(target - headPosition)
         let cosine: Float = min(1, max(-1, simd_dot(forward, toSnake)))
         let degrees: Float = 180 / Float.pi
         let offTarget: Float = acos(cosine) * degrees
         let yaw: Float = atan2(-forward.x, -forward.z) * degrees
         let pitch: Float = asin(forward.y) * degrees
         session.recordHead(HeadSample(
-            time: now, position: headPosition, yawDegrees: yaw, pitchDegrees: pitch, offTargetDegrees: offTarget
+            time: now, phase: session.phase, position: headPosition, yawDegrees: yaw, pitchDegrees: pitch, offTargetDegrees: offTarget
         ))
     }
 
@@ -365,24 +419,28 @@ final class TrackingStage {
 
     // MARK: - Material helpers
 
-    private static func texture(size: Int, draw: (CGContext, CGFloat) -> Void) -> TextureResource? {
+    static func texture(size: Int, draw: (CGContext, CGFloat) -> Void) -> TextureResource? {
+        texture(width: size, height: size) { ctx, width, _ in draw(ctx, width) }
+    }
+
+    static func texture(width: Int, height: Int, draw: (CGContext, CGFloat, CGFloat) -> Void) -> TextureResource? {
         guard let ctx = CGContext(
-            data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: 0,
+            data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
-        draw(ctx, CGFloat(size))
+        draw(ctx, CGFloat(width), CGFloat(height))
         guard let image = ctx.makeImage() else { return nil }
         return try? TextureResource(image: image, withName: nil, options: .init(semantic: .color))
     }
 
-    private static func unlit(texture: TextureResource) -> UnlitMaterial {
+    static func unlit(texture: TextureResource) -> UnlitMaterial {
         var material = UnlitMaterial()
         material.color = .init(tint: .white, texture: .init(texture))
         material.blending = .transparent(opacity: .init(floatLiteral: 1))
         return material
     }
 
-    private static func unlit(color: UIColor, opacity: Float = 1) -> UnlitMaterial {
+    static func unlit(color: UIColor, opacity: Float = 1) -> UnlitMaterial {
         var material = UnlitMaterial(color: color)
         if opacity < 1 {
             material.blending = .transparent(opacity: .init(floatLiteral: opacity))

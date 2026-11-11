@@ -27,6 +27,10 @@ struct ContentView: View {
                     start: { Task { await start() } },
                     playInWindow: playInWindow
                 )
+            case .ready:
+                ScrollView { BaselineInstructionsCard(session: session, inWindow: true) }
+            case .baseline, .recovery:
+                WindowRestView()
             case .countdown, .task:
                 WindowGameView()
             case .complete:
@@ -49,6 +53,8 @@ struct ContentView: View {
         // Simulator smoke test: launch with `-autostart` to run a session hands-free.
         .task {
             guard ProcessInfo.processInfo.arguments.contains("-autostart"), session.phase == .idle else { return }
+            // Short rests so a full smoke test fits in under two minutes. The immersive view presses Start baseline.
+            session.restSeconds = 10
             await start()
         }
         #endif
@@ -92,10 +98,10 @@ private struct StartView: View {
             VStack(spacing: 8) {
                 Text("Follow the Snake")
                     .font(.extraLargeTitle2)
-                Text("Sit comfortably and keep your eyes on the snake.")
+                Text("1 min rest  ·  \(seconds / 60) min game  ·  1 min rest")
                     .font(.title3)
                     .foregroundStyle(.secondary)
-                Text("It speeds up every 10 seconds and saves itself when it's done.")
+                Text("Relax by a moonlit lake, follow the snake as it speeds up every 10 seconds, then relax again. The log saves itself.")
                     .foregroundStyle(.secondary)
             }
             .multilineTextAlignment(.center)
@@ -136,6 +142,42 @@ private struct StartView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
                 .buttonBorderShape(.capsule)
+            }
+        }
+    }
+}
+
+// MARK: - Fallback: rest in the window
+
+private struct WindowRestView: View {
+    @Environment(AppModel.self) private var appModel
+
+    var body: some View {
+        let session = appModel.session
+        TimelineView(.animation) { context in
+            let breath = CGFloat(session.breath(at: context.date))
+            VStack(spacing: 22) {
+                Text(session.phase == .recovery ? "Recovery" : "Baseline")
+                    .font(.title.weight(.semibold))
+                ZStack {
+                    Circle()
+                        .fill(.teal.opacity(0.15 + 0.25 * breath))
+                        .blur(radius: 20)
+                        .frame(width: 140 + 90 * breath, height: 140 + 90 * breath)
+                    Circle()
+                        .fill(Color(red: 0.9, green: 0.92, blue: 0.85).opacity(0.85))
+                        .frame(width: 46, height: 46)
+                }
+                .frame(height: 240)
+                Text(session.isInhaling(at: context.date) ? "Breathe in…" : "Breathe out…")
+                    .font(.system(size: 30, weight: .light, design: .rounded))
+                ProgressView(value: session.progress(at: context.date))
+                    .tint(.teal)
+                    .frame(maxWidth: 320)
+                Button("Stop", role: .destructive) {
+                    session.abort(reason: "stopped_in_window")
+                }
+                .buttonStyle(.bordered)
             }
         }
     }

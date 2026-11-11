@@ -2,17 +2,20 @@
 //  SessionController.swift
 //  Snake Game
 //
-//  One tap runs the whole session: a short countdown, the timed following task,
-//  then the log is saved automatically. Every boundary is stamped by the app.
+//  Runs one session: instructions → 1-minute baseline rest → countdown → the timed
+//  following task → 1-minute recovery rest, then saves the log automatically.
+//  Every boundary is stamped by the app.
 //
 
 import Foundation
 import Observation
 
 enum SessionPhase: String {
-    case idle, countdown, task, complete
+    /// `ready`: instructions are showing and the session waits for the participant to start the baseline.
+    case idle, ready, baseline, countdown, task, recovery, complete
 
-    var isActive: Bool { self == .countdown || self == .task }
+    var isActive: Bool { self != .idle && self != .complete }
+    var isRest: Bool { self == .baseline || self == .recovery }
 }
 
 @MainActor
@@ -21,6 +24,11 @@ final class SessionController {
     /// Lengths the participant can pick on the start screen.
     static let durationOptions = [60, 180, 300]
     static let countdownSeconds = 3
+    /// Normal resting breathing (12 per minute) for the paced rest scene. Not slow paced breathing,
+    /// which would raise HRV and stop being a resting baseline.
+    static let inhaleSeconds: TimeInterval = 2
+    static let exhaleSeconds: TimeInterval = 3
+    static var breathCycle: TimeInterval { inhaleSeconds + exhaleSeconds }
     /// Speed (box units per second) at the start and in the final 10 seconds, whatever the length.
     /// The 10-unit box is crossed in 5 s at the start and in about 1.2 s at the peak.
     static let startSpeed: Float = 2
@@ -33,6 +41,8 @@ final class SessionController {
     var runsImmersive = true
     /// Chosen on the start screen.
     var taskSeconds = 60
+    /// Baseline and recovery rest length.
+    var restSeconds = 60
 
     /// Equal speed steps every 10 s so the last 10-second block runs at `peakSpeed`.
     var speedStep: Float {
@@ -67,6 +77,26 @@ final class SessionController {
         return min(1, max(0, now.timeIntervalSince(start) / end.timeIntervalSince(start)))
     }
 
+    /// Seconds into the current phase.
+    func elapsed(at now: Date = .now) -> TimeInterval {
+        guard let start = phaseStartedAt else { return 0 }
+        return max(0, now.timeIntervalSince(start))
+    }
+
+    /// Breathing guide: 0 = fully out, 1 = fully in. Eased so the motion has no sudden changes.
+    func breath(at now: Date = .now) -> Float {
+        let t = elapsed(at: now).truncatingRemainder(dividingBy: Self.breathCycle)
+        let x: Double = t < Self.inhaleSeconds
+            ? t / Self.inhaleSeconds
+            : 1 - (t - Self.inhaleSeconds) / Self.exhaleSeconds
+        return Float(x * x * (3 - 2 * x))
+    }
+
+    /// True while the guide is in the breathing-in part of the cycle.
+    func isInhaling(at now: Date = .now) -> Bool {
+        elapsed(at: now).truncatingRemainder(dividingBy: Self.breathCycle) < Self.inhaleSeconds
+    }
+
     // MARK: - Lifecycle
 
     func begin(at now: Date = .now) {
@@ -87,11 +117,11 @@ final class SessionController {
         lastTick = now
 
         game.mark(
-            "session_begin task_s=\(taskSeconds) start_speed=\(Self.startSpeed) peak_speed=\(Self.peakSpeed) step=\(String(format: "%.3f", speedStep)) every_s=\(Int(Self.speedIncreaseInterval)) immersive=\(runsImmersive) utc_offset=\(LogClock.utcOffset)",
+            "session_begin baseline_s=\(restSeconds) task_s=\(taskSeconds) recovery_s=\(restSeconds) start_speed=\(Self.startSpeed) peak_speed=\(Self.peakSpeed) step=\(String(format: "%.3f", speedStep)) every_s=\(Int(Self.speedIncreaseInterval)) immersive=\(runsImmersive) utc_offset=\(LogClock.utcOffset)",
             at: now
         )
         boundaries["session_start"] = now
-        enter(.countdown, at: now)
+        enter(.ready, at: now)
 
         loop = Task { [weak self] in
             while !Task.isCancelled {
@@ -101,9 +131,22 @@ final class SessionController {
         }
     }
 
+    /// The participant read the instructions and pressed Start baseline.
+    func startBaseline(at now: Date = .now) {
+        guard phase == .ready else { return }
+        game.mark("participant_pressed_start", at: now)
+        boundaries["instructions_end"] = now
+        enter(.baseline, at: now)
+    }
+
     /// Ends the session early. Whatever was recorded is still saved.
     func abort(reason: String, at now: Date = .now) {
         guard phase.isActive else { return }
+        if phase == .ready {
+            // Nothing was recorded yet; just go back to the start screen.
+            reset()
+            return
+        }
         if game.isRunning { game.stop(at: now) }
         game.mark("session_aborted reason=\(reason) during=\(phase.rawValue)", at: now)
         boundaries["\(phase.rawValue)_end"] = now
@@ -120,16 +163,16 @@ final class SessionController {
         game = FollowGame()
     }
 
-    /// Head pose from the headset during the task (about 20 per second when available).
+    /// Head pose from the headset during the rests and the task (about 20 per second when available).
     func recordHead(_ sample: HeadSample) {
-        guard phase == .task else { return }
+        guard phase.isRest || phase == .task else { return }
         headSamples.append(sample)
     }
 
     // MARK: - Clock
 
     private func tick(now: Date) {
-        guard phase.isActive, let last = lastTick else { return }
+        guard phase.isActive, phase != .ready, let last = lastTick else { return }
         // Never run the game past the scheduled phase end, so boundaries land exactly on time.
         let target = min(now, phaseEndsAt ?? now)
         let gap = target.timeIntervalSince(last)
@@ -149,6 +192,10 @@ final class SessionController {
 
     private func advance(at time: Date) {
         switch phase {
+        case .baseline:
+            game.mark("baseline_end", at: time)
+            boundaries["baseline_end"] = time
+            enter(.countdown, at: time)
         case .countdown:
             game.mark("countdown_end", at: time)
             enter(.task, at: time)
@@ -156,6 +203,10 @@ final class SessionController {
             game.stop(at: time)
             game.mark("task_end", at: time)
             boundaries["task_end"] = time
+            enter(.recovery, at: time)
+        case .recovery:
+            game.mark("recovery_end", at: time)
+            boundaries["recovery_end"] = time
             finish(at: time)
         default:
             break
@@ -166,7 +217,19 @@ final class SessionController {
         phase = next
         phaseStartedAt = time
         lastTick = time
+        let breathing = "breathing_per_min=\(Int(60 / Self.breathCycle)) inhale_s=\(Int(Self.inhaleSeconds)) exhale_s=\(Int(Self.exhaleSeconds)) scene=moonlit_lake"
         switch next {
+        case .ready:
+            phaseEndsAt = nil
+            game.mark("instructions_shown", at: time)
+        case .baseline:
+            phaseEndsAt = time.addingTimeInterval(TimeInterval(restSeconds))
+            boundaries["baseline_start"] = time
+            game.mark("baseline_start rest_s=\(restSeconds) \(breathing)", at: time)
+        case .recovery:
+            phaseEndsAt = time.addingTimeInterval(TimeInterval(restSeconds))
+            boundaries["recovery_start"] = time
+            game.mark("recovery_start rest_s=\(restSeconds) \(breathing)", at: time)
         case .countdown:
             phaseEndsAt = time.addingTimeInterval(TimeInterval(Self.countdownSeconds))
             game.mark("countdown_start", at: time)
@@ -243,13 +306,14 @@ final class SessionController {
     /// One row per session with the task window in unix ms, ready to join with sensor data.
     private func appendSummary(file: String, in dir: URL) throws -> URL {
         let url = dir.appendingPathComponent("sessions_summary.csv")
-        let keys = ["session_start", "task_start", "task_end", "session_end"]
-        let offTarget = headSamples.map(\.offTargetDegrees)
+        let keys = ["session_start", "instructions_end", "baseline_start", "baseline_end", "task_start", "task_end",
+                    "recovery_start", "recovery_end", "session_end"]
+        let offTarget = headSamples.filter { $0.phase == .task }.map(\.offTargetDegrees)
         let meanOffTarget = offTarget.isEmpty ? "" : String(format: "%.2f", offTarget.reduce(0, +) / Float(offTarget.count))
-        let header = (["file", "task_s", "completed", "immersive", "frame_stalls", "head_samples",
+        let header = (["file", "rest_s", "task_s", "completed", "immersive", "frame_stalls", "head_samples",
                        "mean_head_off_target_deg", "utc_offset"]
             + keys.map { $0 + "_unix_ms" }).joined(separator: ",")
-        let row = ([file, String(taskSeconds), String(!wasAborted), String(runsImmersive), String(stallCount),
+        let row = ([file, String(restSeconds), String(taskSeconds), String(!wasAborted), String(runsImmersive), String(stallCount),
                     String(headSamples.count), meanOffTarget, LogClock.utcOffset]
             + keys.map { boundaries[$0].map { String(LogClock.unixMillis($0)) } ?? "" }).joined(separator: ",")
 
@@ -269,19 +333,22 @@ final class SessionController {
 /// tracking, so head direction is the closest available proxy for following.
 struct HeadSample {
     let time: Date
+    let phase: SessionPhase
     let position: SIMD3<Float>
     let yawDegrees: Float
     let pitchDegrees: Float
-    /// Angle between where the head points and the snake's head.
+    /// Angle between where the head points and the snake's head (during the task)
+    /// or the moon's reflection on the lake (during the rests).
     let offTargetDegrees: Float
 
     static func csv(_ samples: [HeadSample]) -> String {
-        var rows = ["unix_ms,timestamp,head_x,head_y,head_z,yaw_deg,pitch_deg,off_target_deg"]
+        var rows = ["unix_ms,timestamp,phase,head_x,head_y,head_z,yaw_deg,pitch_deg,off_target_deg"]
         rows.reserveCapacity(samples.count + 1)
         for s in samples {
             rows.append([
                 String(LogClock.unixMillis(s.time)),
                 LogClock.string(from: s.time),
+                s.phase.rawValue,
                 String(format: "%.3f", s.position.x),
                 String(format: "%.3f", s.position.y),
                 String(format: "%.3f", s.position.z),
