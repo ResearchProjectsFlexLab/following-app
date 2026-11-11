@@ -54,7 +54,7 @@ struct ContentView: View {
         .task {
             guard ProcessInfo.processInfo.arguments.contains("-autostart"), session.phase == .idle else { return }
             // Short rests so a full smoke test fits in under two minutes. The immersive view presses Start baseline.
-            session.restSeconds = 10
+            session.restSeconds = 30
             await start()
         }
         #endif

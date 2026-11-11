@@ -16,7 +16,8 @@ import SwiftUI
 final class LakeScene {
     /// Where the participant is asked to look: the moon's reflection on the water.
     static let fixationPoint = SIMD3<Float>(0, 0, -12)
-    static let moonPosition = SIMD3<Float>(0, 9, -33)
+    /// Beyond the hills (radius 36) and well inside the sky dome (radius 60), about 15° above the horizon.
+    static let moonPosition = SIMD3<Float>(0, 10, -37.5)
 
     let root = Entity()
 
@@ -31,9 +32,12 @@ final class LakeScene {
     init() {
         // Water: a large dark disc that brightens slightly toward the horizon, like a lake reflecting the sky.
         if let texture = TrackingStage.texture(size: 512, draw: Self.drawWater) {
+            // Opaque, so it is drawn before the see-through reflection and ripples that sit on it.
+            var waterMaterial = UnlitMaterial()
+            waterMaterial.color = .init(tint: .white, texture: .init(texture))
             let water = ModelEntity(
                 mesh: .generatePlane(width: 76, depth: 76, cornerRadius: 38),
-                materials: [TrackingStage.unlit(texture: texture)]
+                materials: [waterMaterial]
             )
             water.position.y = 0.002
             root.addChild(water)
@@ -62,7 +66,7 @@ final class LakeScene {
             materials: [glowTexture.map { TrackingStage.unlit(texture: $0) }
                 ?? TrackingStage.unlit(color: .white, opacity: 0.1)]
         )
-        moonHalo.position = Self.moonPosition + SIMD3<Float>(0, 0, -1.6)
+        moonHalo.position = Self.moonPosition + SIMD3<Float>(0, 0, -0.8)
         moonHalo.components.set(OpacityComponent(opacity: 0.6))
         root.addChild(moonHalo)
 

@@ -110,7 +110,7 @@ final class TrackingStage {
         let size = Self.boardSize
 
         // Night sky dome and stars.
-        let dome = ModelEntity(mesh: .generateSphere(radius: 40), materials: [Self.skyMaterial()])
+        let dome = ModelEntity(mesh: .generateSphere(radius: 60), materials: [Self.skyMaterial()])
         dome.scale = SIMD3(-1, 1, 1)
         root.addChild(dome)
         root.addChild(Self.makeStars(count: 700, radius: 30))
